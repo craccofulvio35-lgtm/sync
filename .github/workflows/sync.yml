@@ -44,4 +44,4 @@ jobs:
           SHOPIFY_TOKEN: ${{ secrets.SHOPIFY_TOKEN }}
           TURUM_USER: ${{ secrets.TURUM_USER }}
           TURUM_PASS: ${{ secrets.TURUM_PASS }}
-        run: python rudy5.py
+        run: python script.py
