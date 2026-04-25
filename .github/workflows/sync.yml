@@ -1,19 +1,17 @@
-name: VIP-Lane Sync (Max Efficiency)
+name: Sniper-Sync Turum-Shopify (Max Efficienza)
 
 on:
   schedule:
-    # ORARI IN UTC (L'Italia è UTC+1 o UTC+2)
-    
-    # 1) NOTTE: Un solo controllo alle 02:07 di notte ITA (00:07 UTC)
-    - cron: '7 0 * * *'
+    # ORARI IN UTC (L'Italia è UTC+1/UTC+2)
 
-    # 2) MATTINA: Ogni 90 minuti (08:05, 09:35, 11:05, 12:35, 14:05, 15:35 ITA)
-    # Minuti sfalsati (5 e 35) per saltare la coda dei server GitHub
-    - cron: '5,35 6,9,12 * * *'
+    # 1) NOTTE: Un solo controllo alle 02:00 di notte ITA (00:00 UTC)
+    - cron: '0 0 * * *'
+
+    # 2) MATTINO / PRIMO POMERIGGIO: Ogni ora (08:00 - 16:00 ITA) -> 9 Esecuzioni
+    - cron: '0 6-14 * * *'
     
-    # 3) PRIME TIME: Ogni 30 minuti esatti ma sfalsati (16:05, 16:35... fino alle 23:35 ITA)
-    # Copre perfettamente l'orario in cui la gente compra dopo lavoro
-    - cron: '5,35 14-21 * * *'
+    # 3) PRIME TIME ESTREMO: Ogni 20 minuti (17:00 - 23:00 ITA) -> 21 Esecuzioni
+    - cron: '5,25,45 15-21 * * *'
 
   workflow_dispatch:
 
@@ -24,13 +22,13 @@ concurrency:
 jobs:
   sync-inventory:
     runs-on: ubuntu-latest
-    timeout-minutes: 3 # Abbassato a 3 min. Se ci mette di più, c'è un problema di rete.
+    timeout-minutes: 4
 
     steps:
       - name: 1. Checkout codice
         uses: actions/checkout@v4
 
-      - name: 2. Setup Python
+      - name: 2. Setup Python Ultra-Veloce
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -44,4 +42,4 @@ jobs:
           SHOPIFY_TOKEN: ${{ secrets.SHOPIFY_TOKEN }}
           TURUM_USER: ${{ secrets.TURUM_USER }}
           TURUM_PASS: ${{ secrets.TURUM_PASS }}
-        run: python script.py
+        run: python script.py # Il nome del tuo script
