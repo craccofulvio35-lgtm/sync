@@ -517,6 +517,8 @@ def main():
         turum_skus_seen = set()
         stats = {"new": 0, "existing": 0, "stock_changed": 0, "price_changed": 0, "drafted": 0, "activated": 0, "missing_created": 0}
         missing_candidates_total = 0
+        missing_create_attempted_total = 0
+        missing_create_failed_total = 0
         
         pending_publish_ids, pending_collection_assigns, pending_image_uploads = [], [], []
 
@@ -572,7 +574,9 @@ def main():
 
                 if p_id and missing_variants and AUTO_CREATE_MISSING_VARIANTS:
                     missing_candidates_total += len(missing_variants)
+                    missing_create_attempted_total += len(missing_variants)
                     created_skus = create_missing_variants(p_id, base_sku, name, missing_variants, option_name)
+                    missing_create_failed_total += max(len(missing_variants) - len(created_skus), 0)
                     if created_skus:
                         stats["missing_created"] += len(created_skus)
                         for mv in missing_variants:
@@ -608,7 +612,9 @@ def main():
                     missing_for_existing = [v for v in variants if build_variant_sku(base_sku, v) not in existing_product_skus]
                     if missing_for_existing:
                         missing_candidates_total += len(missing_for_existing)
+                        missing_create_attempted_total += len(missing_for_existing)
                     created_skus = create_missing_variants(existing_pid_by_handle, base_sku, name, missing_for_existing, option_name)
+                    missing_create_failed_total += max(len(missing_for_existing) - len(created_skus), 0)
                     if created_skus:
                         stats["missing_created"] += len(created_skus)
                         for mv in missing_for_existing:
@@ -645,7 +651,9 @@ def main():
                             existing_product_skus = get_product_variant_skus(existing_pid_by_handle)
                             option_name = "Taglia EU" if any(c.isdigit() for c in str(variants[0].get("eu_size", "") or variants[0].get("size", ""))) else "Taglia"
                             missing_for_existing = [v for v in variants if build_variant_sku(base_sku, v) not in existing_product_skus]
+                            missing_create_attempted_total += len(missing_for_existing)
                             created_skus = create_missing_variants(existing_pid_by_handle, base_sku, name, missing_for_existing, option_name)
+                            missing_create_failed_total += max(len(missing_for_existing) - len(created_skus), 0)
                             if created_skus:
                                 stats["missing_created"] += len(created_skus)
                                 for mv in missing_for_existing:
@@ -711,10 +719,21 @@ def main():
         print(f"  â˜€ï¸ Prodotti Riattivati:       {stats['activated']}")
         print(f"  ðŸ§© Varianti mancanti create:   {stats['missing_created']}")
         print(f"  ðŸ“ Varianti mancanti candidate: {missing_candidates_total}")
+        print(f"  ðŸŽ¯ Tentativi creazione varianti: {missing_create_attempted_total}")
+        print(f"  ðŸš« Creazioni varianti fallite:  {missing_create_failed_total}")
         if _missing_create_failure_reasons:
             print("  ðŸ§ª Top errori creazione varianti:")
             for reason, count in sorted(_missing_create_failure_reasons.items(), key=lambda x: x[1], reverse=True)[:5]:
                 print(f"     - {count}x {reason[:120]}")
+
+        log_info(f"Varianti mancanti candidate: {missing_candidates_total}")
+        log_info(f"Tentativi creazione varianti: {missing_create_attempted_total}")
+        log_info(f"Varianti mancanti create: {stats['missing_created']}")
+        log_info(f"Creazioni varianti fallite: {missing_create_failed_total}")
+        if _missing_create_failure_reasons:
+            top_errors = sorted(_missing_create_failure_reasons.items(), key=lambda x: x[1], reverse=True)[:5]
+            for reason, count in top_errors:
+                log_info(f"Top errore creazione varianti: {count}x {reason[:180]}")
         print(f"\n  ðŸ“„ Log Audit (TXT):         {LOG_FILENAME}")
         print(f"  ðŸ“Š Log Modifiche (CSV):     {CSV_FILENAME}")
         print("=" * 60)
