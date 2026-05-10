@@ -394,6 +394,39 @@ def create_missing_variants(product_id, base_sku, name, missing_variants, option
     if not missing_variants:
         return set()
     expected_skus = {build_variant_sku(base_sku, v) for v in missing_variants}
+
+    def create_single_with_reconcile(mv):
+        target_sku = build_variant_sku(base_sku, mv)
+        for attempt in range(3):
+            single_payload = [build_variant_payload(base_sku, mv, option_name)]
+            single_res = shopify_post({
+                "query": "mutation productVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) { productVariantsBulkCreate(productId: $productId, variants: $variants) { productVariants { id sku } userErrors { field message } } }",
+                "variables": {"productId": product_id, "variants": single_payload}
+            })
+            single_errors = parse_shopify_user_errors(single_res, "productVariantsBulkCreate")
+            if single_errors:
+                add_failure_reasons(single_errors)
+                if attempt == 2:
+                    log_txt("ERROR", name, target_sku, note=f"Creazione variante fallita: {'; '.join(single_errors[:2])}")
+                time.sleep(0.6 + (0.4 * attempt))
+                continue
+
+            single_created = single_res.get("data", {}).get("productVariantsBulkCreate", {}).get("productVariants", []) or []
+            for sc in single_created:
+                sku = sc.get("sku")
+                if sku:
+                    return sku
+
+            # Risposta vuota: verifica reale a catalogo
+            time.sleep(0.8)
+            current_skus = get_product_variant_skus(product_id)
+            if target_sku in current_skus:
+                return target_sku
+
+        add_failure_reasons(["Risposta vuota su create singola variante"])
+        log_txt("ERROR", name, target_sku, note="Creazione variante: risposta Shopify vuota anche in fallback singolo")
+        return None
+
     payload = [build_variant_payload(base_sku, v, option_name) for v in missing_variants]
     res = shopify_post({
         "query": "mutation productVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) { productVariantsBulkCreate(productId: $productId, variants: $variants) { productVariants { id sku } userErrors { field message } } }",
@@ -405,21 +438,9 @@ def create_missing_variants(product_id, base_sku, name, missing_variants, option
         # Fallback robusto: se il bulk fallisce, prova variante-per-variante.
         created_skus = set()
         for mv in missing_variants:
-            single_payload = [build_variant_payload(base_sku, mv, option_name)]
-            single_res = shopify_post({
-                "query": "mutation productVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) { productVariantsBulkCreate(productId: $productId, variants: $variants) { productVariants { id sku } userErrors { field message } } }",
-                "variables": {"productId": product_id, "variants": single_payload}
-            })
-            single_errors = parse_shopify_user_errors(single_res, "productVariantsBulkCreate")
-            if single_errors:
-                add_failure_reasons(single_errors)
-                log_txt("ERROR", name, build_variant_sku(base_sku, mv), note=f"Creazione variante fallita: {'; '.join(single_errors[:2])}")
-                continue
-            single_created = single_res.get("data", {}).get("productVariantsBulkCreate", {}).get("productVariants", []) or []
-            for sc in single_created:
-                sku = sc.get("sku")
-                if sku:
-                    created_skus.add(sku)
+            single_sku = create_single_with_reconcile(mv)
+            if single_sku:
+                created_skus.add(single_sku)
         if created_skus:
             cached = _product_variants_cache.get(product_id, set())
             _product_variants_cache[product_id] = set(cached).union(created_skus)
@@ -442,9 +463,21 @@ def create_missing_variants(product_id, base_sku, name, missing_variants, option
         if reconciled:
             return reconciled
 
+    # Se il bulk è vuoto senza errori, prova comunque singolarmente ogni variante.
+    created_skus = set()
+    for mv in missing_variants:
+        single_sku = create_single_with_reconcile(mv)
+        if single_sku:
+            created_skus.add(single_sku)
+
+    if created_skus:
+        cached = _product_variants_cache.get(product_id, set())
+        _product_variants_cache[product_id] = set(cached).union(created_skus)
+        return created_skus
+
     add_failure_reasons(["Risposta productVariantsBulkCreate vuota (nessuna variante creata)"])
-    log_txt("ERROR", name, base_sku, note="Creazione varianti: risposta Shopify vuota senza userErrors")
-    return created_skus
+    log_txt("ERROR", name, base_sku, note="Creazione varianti: risposta Shopify vuota senza userErrors (anche dopo fallback singolo)")
+    return set()
 
 def get_shopify_inventory():
     console_log("Download inventario Shopify globale in corso...")
