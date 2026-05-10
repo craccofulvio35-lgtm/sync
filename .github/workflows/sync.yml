@@ -43,3 +43,14 @@ jobs:
           TURUM_USER: ${{ secrets.TURUM_USER }}
           TURUM_PASS: ${{ secrets.TURUM_PASS }}
         run: python script.py # Il nome del tuo script
+    
+      # AGGIUNGI QUESTO BLOCCO ALLA FINE:
+      - name: 5. Salva i Log (Artefatti)
+        uses: actions/upload-artifact@v4
+        if: always() # Salva i log anche se lo script va in errore
+        with:
+          name: Sync-Logs
+          path: |
+            *.txt
+            *.csv
+          retention-days: 7
