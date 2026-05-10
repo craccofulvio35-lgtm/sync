@@ -132,6 +132,11 @@ def shopify_post(payload, retries=5):
             if r.status_code == 429: 
                 handle_rate_limit(attempt); continue
             data = r.json()
+            if not isinstance(data, dict):
+                if attempt == retries - 1:
+                    return {}
+                time.sleep(1)
+                continue
             if "errors" in data:
                 if any(e.get("extensions", {}).get("code") == "THROTTLED" for e in data["errors"]):
                     handle_rate_limit(attempt); continue
@@ -183,8 +188,11 @@ def get_shopify_location():
 def get_online_store_publication_id():
     edges = shopify_post({'query': '{ publications(first: 20) { edges { node { id name } } } }'}).get("data", {}).get("publications", {}).get("edges", [])
     for e in edges:
-        if any(w in e["node"]["name"].lower() for w in ["online", "negozio", "web"]): return e["node"]["id"]
-    return edges[0]["node"]["id"] if edges else None
+        node = e.get("node", {})
+        node_name = (node.get("name") or "").lower()
+        if any(w in node_name for w in ["online", "negozio", "web"]):
+            return node.get("id")
+    return (edges[0].get("node", {}) or {}).get("id") if edges else None
 
 def publish_to_online_store(product_id):
     if PUBLICATION_ID: 
@@ -220,9 +228,16 @@ def get_or_create_collection(title):
     if title in _collection_cache: return _collection_cache[title]
     r = shopify_rest("GET", f"custom_collections.json?title={requests.utils.quote(title)}&limit=1")
     if r and r.status_code == 200 and r.json().get("custom_collections"):
-        cid = r.json()["custom_collections"][0]["id"]; _collection_cache[title] = cid; return cid
+        cid = (r.json()["custom_collections"][0] or {}).get("id")
+        if cid:
+            _collection_cache[title] = cid
+            return cid
     r = shopify_rest("POST", "custom_collections.json", {"custom_collection": {"title": title, "published": True}})
-    if r and r.status_code == 201: cid = r.json()["custom_collection"]["id"]; _collection_cache[title] = cid; return cid
+    if r and r.status_code == 201:
+        cid = (r.json().get("custom_collection", {}) or {}).get("id")
+        if cid:
+            _collection_cache[title] = cid
+            return cid
     return None
 
 def add_product_to_collection(product_numeric_id, collection_id):
@@ -331,12 +346,29 @@ def get_shopify_inventory():
         q = f'query($cursor: String) {{ productVariants(first: 250, after: $cursor) {{ pageInfo {{ hasNextPage endCursor }} edges {{ node {{ id sku price product {{ id status tags }} inventoryItem {{ id inventoryLevel(locationId: "{LOCATION_ID}") {{ quantities(names: ["available"]) {{ quantity }} }} }} }} }} }} }}'
         vdata = shopify_post({"query": q, "variables": {"cursor": cursor}}).get("data", {}).get("productVariants", {})
         for e in vdata.get("edges", []):
-            n = e["node"]; sku = n.get("sku")
+            n = e.get("node", {}) or {}
+            sku = n.get("sku")
             if not sku: continue
-            p_id = n["product"]["id"]; status_map[p_id] = n["product"]["status"]
+            product = n.get("product", {}) or {}
+            p_id = product.get("id")
+            if not p_id:
+                continue
+            status_map[p_id] = product.get("status", "DRAFT")
             qty = 0
-            if n.get("inventoryItem", {}).get("inventoryLevel"): qty = n["inventoryItem"]["inventoryLevel"]["quantities"][0]["quantity"]
-            inv[sku] = {"variant_id": n["id"], "product_id": p_id, "inv_id": n["inventoryItem"]["id"], "qty": qty, "price": float(n["price"]), "is_turum": "Turum" in n["product"]["tags"]}
+            inventory_item = n.get("inventoryItem", {}) or {}
+            inv_level = inventory_item.get("inventoryLevel")
+            if inv_level:
+                quantities = inv_level.get("quantities", []) or []
+                if quantities:
+                    qty = quantities[0].get("quantity", 0) or 0
+            inv[sku] = {
+                "variant_id": n.get("id"),
+                "product_id": p_id,
+                "inv_id": inventory_item.get("id"),
+                "qty": qty,
+                "price": float(n.get("price", 0) or 0),
+                "is_turum": "Turum" in (product.get("tags") or [])
+            }
         has_next, cursor = vdata.get("pageInfo", {}).get("hasNextPage", False), vdata.get("pageInfo", {}).get("endCursor")
     return inv, status_map
 
@@ -357,6 +389,8 @@ def create_product(name, item, variants):
     return shopify_post({"query": "mutation productSet($input: ProductSetInput!) { productSet(input: $input) { product { id } userErrors { field message } } }", "variables": v})
 
 def shopify_error_note(res):
+    if not isinstance(res, dict):
+        return "Risposta Shopify non valida o vuota durante creazione prodotto"
     return format_errors_for_log(res, "productSet", "Errore API Shopify creazione prodotto")
 
 # =========================
@@ -461,7 +495,9 @@ def main():
             else:
                 if stats["new"] >= MAX_NEW_PRODUCTS_PER_RUN: continue
                 res = create_product(name, item, variants)
-                pid = res.get("data", {}).get("productSet", {}).get("product", {}).get("id")
+                product_set = (res.get("data", {}) or {}).get("productSet") or {}
+                product_node = product_set.get("product") or {}
+                pid = product_node.get("id")
                 if pid:
                     pending_publish_ids.append(pid)
                     pending_image_uploads.append({"pid": pid, "image": item.get("image"), "name": name})
@@ -540,3 +576,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
