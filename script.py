@@ -373,7 +373,12 @@ def main():
             else:
                 if stats["new"] >= MAX_NEW_PRODUCTS_PER_RUN: continue
                 res = create_product(name, item, variants)
+                
+                # Estraiamo l'ID, ma anche eventuali messaggi di errore da Shopify
                 pid = res.get("data", {}).get("productSet", {}).get("product", {}).get("id")
+                user_errors = res.get("data", {}).get("productSet", {}).get("userErrors",[])
+                top_errors = res.get("errors",[])
+
                 if pid:
                     pending_publish_ids.append(pid)
                     p_type = "Scarpe" if any(c.isdigit() for c in str(variants[0].get("size", ""))) else "Abbigliamento"
@@ -386,9 +391,16 @@ def main():
                         sku_new = f"{base_sku}-{v.get('size','')}"
                         log_txt("NEW", name, sku_new, note="Creato ex-novo in Shopify (Batch)")
                         log_csv("NEW", name, sku_new, v.get("stock",0), 0, v.get("price",0), 0, round(float(v.get("price",0))*1.22*1.10,2), "Prodotto nuovo")
-                else: 
-                    log_txt("ERROR", name, base_sku, note="Errore API Shopify creazione prodotto")
-
+                else:
+                    # Raccogliamo il vero motivo dell'errore
+                    error_details = "Errore Sconosciuto"
+                    if user_errors:
+                        error_details = " | ".join([e.get("message", "") for e in user_errors])
+                    elif top_errors:
+                        error_details = " | ".join([e.get("message", "") for e in top_errors])
+                        
+                    log_txt("ERROR", name, base_sku, note=f"Errore Shopify: {error_details}")
+                    
         print(); console_log("Fase 1 completata. Analisi Ghost e invio Bulk..."); print("=" * 60)
 
         if prices_updates:
