@@ -393,6 +393,7 @@ def bulk_price_update(product_id, variants_prices):
 def create_missing_variants(product_id, base_sku, name, missing_variants, option_name):
     if not missing_variants:
         return set()
+    expected_skus = {build_variant_sku(base_sku, v) for v in missing_variants}
     payload = [build_variant_payload(base_sku, v, option_name) for v in missing_variants]
     res = shopify_post({
         "query": "mutation productVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) { productVariantsBulkCreate(productId: $productId, variants: $variants) { productVariants { id sku } userErrors { field message } } }",
@@ -430,6 +431,19 @@ def create_missing_variants(product_id, base_sku, name, missing_variants, option
     if created_skus:
         cached = _product_variants_cache.get(product_id, set())
         _product_variants_cache[product_id] = set(cached).union(created_skus)
+        return created_skus
+
+    # Alcune risposte Shopify possono essere "vuote" pur avendo applicato modifiche:
+    # verifica lato catalogo dopo un breve ritardo.
+    for _ in range(2):
+        time.sleep(0.8)
+        current_skus = get_product_variant_skus(product_id)
+        reconciled = expected_skus.intersection(current_skus)
+        if reconciled:
+            return reconciled
+
+    add_failure_reasons(["Risposta productVariantsBulkCreate vuota (nessuna variante creata)"])
+    log_txt("ERROR", name, base_sku, note="Creazione varianti: risposta Shopify vuota senza userErrors")
     return created_skus
 
 def get_shopify_inventory():
