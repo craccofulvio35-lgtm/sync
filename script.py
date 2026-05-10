@@ -217,6 +217,8 @@ def update_product_status(product_id, status):
     })
 
 _collection_cache = {}
+_handle_product_cache = {}
+_product_variants_cache = {}
 def preload_collections_cache():
     try:
         r = shopify_rest("GET", "custom_collections.json?limit=250&fields=id,title")
@@ -300,6 +302,47 @@ def build_variant_payload(base_sku, variant, option_name):
         "inventoryQuantities": [{"name": "available", "quantity": int(variant.get("stock", 0)), "locationId": LOCATION_ID}]
     }
 
+def build_product_handle(name, base_sku):
+    handle_slug = HANDLE_RE.sub('-', name.lower()).strip('-')
+    sku_slug = HANDLE_RE.sub('-', base_sku.lower()).strip('-')
+    return f"{handle_slug}-{sku_slug}"
+
+def get_product_id_by_handle(handle):
+    if handle in _handle_product_cache:
+        return _handle_product_cache[handle]
+    query = """
+    query($handle: String!) {
+      productByHandle(handle: $handle) { id handle }
+    }
+    """
+    data = shopify_post({"query": query, "variables": {"handle": handle}})
+    node = data.get("data", {}).get("productByHandle", {}) or {}
+    pid = node.get("id") if node.get("handle") == handle else None
+    _handle_product_cache[handle] = pid
+    return pid
+
+def get_product_variant_skus(product_id):
+    if product_id in _product_variants_cache:
+        return set(_product_variants_cache[product_id])
+    query = """
+    query($id: ID!) {
+      product(id: $id) {
+        variants(first: 250) {
+          edges { node { sku } }
+        }
+      }
+    }
+    """
+    data = shopify_post({"query": query, "variables": {"id": product_id}})
+    edges = data.get("data", {}).get("product", {}).get("variants", {}).get("edges", [])
+    skus = set()
+    for edge in edges:
+        sku = ((edge or {}).get("node", {}) or {}).get("sku")
+        if sku:
+            skus.add(sku)
+    _product_variants_cache[product_id] = set(skus)
+    return skus
+
 # =========================
 # AGGIORNAMENTI IN BLOCCO E CREAZIONE
 # =========================
@@ -347,7 +390,11 @@ def create_missing_variants(product_id, base_sku, name, missing_variants, option
         log_txt("ERROR", name, base_sku, note=f"Creazione varianti mancanti fallita: {'; '.join(errors[:3])}")
         return set()
     created = res.get("data", {}).get("productVariantsBulkCreate", {}).get("productVariants", []) or []
-    return {v.get("sku") for v in created if v.get("sku")}
+    created_skus = {v.get("sku") for v in created if v.get("sku")}
+    if created_skus:
+        cached = _product_variants_cache.get(product_id, set())
+        _product_variants_cache[product_id] = set(cached).union(created_skus)
+    return created_skus
 
 def get_shopify_inventory():
     console_log("Download inventario Shopify globale in corso...")
@@ -385,7 +432,7 @@ def get_shopify_inventory():
 def create_product(name, item, variants):
     p_type, o_name = ("Scarpe", "Taglia EU") if any(c.isdigit() for c in str(variants[0].get("eu_size", "") or variants[0].get("size", ""))) else ("Abbigliamento", "Taglia")
     bsku, brand = item.get("sku", "NOSKU"), item.get("brand", "Custom")
-    handle_slug = HANDLE_RE.sub('-', name.lower()).strip('-'); sku_slug = HANDLE_RE.sub('-', bsku.lower()).strip('-')
+    product_handle = build_product_handle(name, bsku)
     
     vars_shopify, option_values, seen_option_values = [], [], set()
     for v in variants:
@@ -395,7 +442,7 @@ def create_product(name, item, variants):
             option_values.append({"name": size_val})
             seen_option_values.add(size_val)
 
-    v = {"input": {"title": name, "handle": f"{handle_slug}-{sku_slug}", "vendor": brand, "productType": p_type, "status": "ACTIVE", "tags": ["Turum", "turum-sync", p_type, brand], "productOptions": [{"name": o_name, "values": option_values}], "variants": vars_shopify}}
+    v = {"input": {"title": name, "handle": product_handle, "vendor": brand, "productType": p_type, "status": "ACTIVE", "tags": ["Turum", "turum-sync", p_type, brand], "productOptions": [{"name": o_name, "values": option_values}], "variants": vars_shopify}}
     return shopify_post({"query": "mutation productSet($input: ProductSetInput!) { productSet(input: $input) { product { id } userErrors { field message } } }", "variables": v})
 
 def shopify_error_note(res):
@@ -504,6 +551,22 @@ def main():
 
             else:
                 if stats["new"] >= MAX_NEW_PRODUCTS_PER_RUN: continue
+                pre_handle = build_product_handle(name, base_sku)
+                existing_pid_by_handle = get_product_id_by_handle(pre_handle)
+                if existing_pid_by_handle:
+                    existing_product_skus = get_product_variant_skus(existing_pid_by_handle)
+                    option_name = "Taglia EU" if any(c.isdigit() for c in str(variants[0].get("eu_size", "") or variants[0].get("size", ""))) else "Taglia"
+                    missing_for_existing = [v for v in variants if build_variant_sku(base_sku, v) not in existing_product_skus]
+                    created_skus = create_missing_variants(existing_pid_by_handle, base_sku, name, missing_for_existing, option_name)
+                    if created_skus:
+                        stats["missing_created"] += len(created_skus)
+                        for mv in missing_for_existing:
+                            mv_sku = build_variant_sku(base_sku, mv)
+                            if mv_sku not in created_skus:
+                                continue
+                            log_txt("NEW", name, mv_sku, note="Variante creata su prodotto già esistente (handle match)")
+                            log_csv("NEW", name, mv_sku, mv.get("stock",0), 0, mv.get("price",0), 0, calc_final_price(mv.get("price",0)), "Variante creata su handle esistente")
+                    continue
                 res = create_product(name, item, variants)
                 product_set = (res.get("data", {}) or {}).get("productSet") or {}
                 product_node = product_set.get("product") or {}
@@ -523,7 +586,25 @@ def main():
                         log_txt("NEW", name, sku_new, note="Creato ex-novo in Shopify (Batch)")
                         log_csv("NEW", name, sku_new, v.get("stock",0), 0, v.get("price",0), 0, round(float(v.get("price",0))*1.22*1.10,2), "Prodotto nuovo")
                 else: 
-                    log_txt("ERROR", name, base_sku, note=shopify_error_note(res))
+                    err_note = shopify_error_note(res)
+                    # Recovery automatico: in caso di handle già esistente, riconcilia le varianti sul prodotto trovato.
+                    if "handle" in err_note.lower() and "already in use" in err_note.lower():
+                        existing_pid_by_handle = get_product_id_by_handle(pre_handle)
+                        if existing_pid_by_handle:
+                            existing_product_skus = get_product_variant_skus(existing_pid_by_handle)
+                            option_name = "Taglia EU" if any(c.isdigit() for c in str(variants[0].get("eu_size", "") or variants[0].get("size", ""))) else "Taglia"
+                            missing_for_existing = [v for v in variants if build_variant_sku(base_sku, v) not in existing_product_skus]
+                            created_skus = create_missing_variants(existing_pid_by_handle, base_sku, name, missing_for_existing, option_name)
+                            if created_skus:
+                                stats["missing_created"] += len(created_skus)
+                                for mv in missing_for_existing:
+                                    mv_sku = build_variant_sku(base_sku, mv)
+                                    if mv_sku not in created_skus:
+                                        continue
+                                    log_txt("NEW", name, mv_sku, note="Recovery da handle duplicato: variante creata")
+                                    log_csv("NEW", name, mv_sku, mv.get("stock",0), 0, mv.get("price",0), 0, calc_final_price(mv.get("price",0)), "Recovery handle duplicato")
+                                continue
+                    log_txt("ERROR", name, base_sku, note=err_note)
 
         print(); console_log("Fase 1 completata. Analisi Ghost e invio Bulk..."); print("=" * 60)
 
