@@ -326,11 +326,12 @@ def build_variant_payload(base_sku, variant, option_name):
         "inventoryQuantities": [{"name": "available", "quantity": int(variant.get("stock", 0)), "locationId": LOCATION_ID}]
     }
 
+# ✅ FIX — sku dentro inventoryItem
 def build_bulk_create_variant_payload(base_sku, variant, option_name):
     size_val = get_variant_size(variant)
     return {
-        "price": calc_final_price(variant.get("price", 0)),
-        "sku": build_variant_sku(base_sku, variant),
+        "price": str(calc_final_price(variant.get("price", 0))),
+        "inventoryItem": {"sku": build_variant_sku(base_sku, variant)},
         "optionValues": [{"optionName": option_name, "name": size_val or "N/A"}],
         "inventoryQuantities": [{"availableQuantity": int(variant.get("stock", 0)), "locationId": LOCATION_ID}]
     }
