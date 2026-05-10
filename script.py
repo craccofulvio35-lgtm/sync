@@ -21,7 +21,6 @@ TURUM_USER  = os.getenv("TURUM_USER")
 TURUM_PASS  = os.getenv("TURUM_PASS")
 SHOPIFY_TOKEN = os.getenv("SHOPIFY_TOKEN")
 
-# Aggiungi un controllo per assicurarti che le variabili siano state caricate
 if not all([TURUM_USER, TURUM_PASS, SHOPIFY_TOKEN]):
     print("ERRORE: Le credenziali non sono state trovate nelle variabili d'ambiente. Uscita.")
     sys.exit(1)
@@ -64,12 +63,10 @@ def console_log(msg, end="\n"):
 
 def init_logs():
     global LOG_FILE_HANDLE, CSV_FILE_HANDLE, CSV_WRITER
-    # TXT: Audit completo
     LOG_FILE_HANDLE = open(LOG_FILENAME, "w", encoding="utf-8")
     LOG_FILE_HANDLE.write("=== AUDIT COMPLETO SINCRONIZZAZIONE ===\n\n")
     LOG_FILE_HANDLE.flush()
     
-    # CSV: Solo modifiche/nuovi (Excel ready)
     CSV_FILE_HANDLE = open(CSV_FILENAME, "w", newline="", encoding="utf-8-sig")
     CSV_WRITER = csv.writer(CSV_FILE_HANDLE)
     CSV_WRITER.writerow(["Evento", "Nome Prodotto", "SKU", "Stock_Turum", "Stock_Shopify", "Prezzo_Turum", "Prezzo_Shopify", "Prezzo_Finale", "Note"])
@@ -93,14 +90,13 @@ def log_txt(event, name, sku, t_stock="N/A", s_stock="N/A", s_changed="NO",
         line += f"Turum Price: €{t_price} | Shopify Before: €{s_price} | Final Calc: €{f_price} | Price Updated: {p_changed} | "
         line += f"Turum Stock: {t_stock} | Shopify Before: {s_stock} | Stock Updated: {s_changed}"
     if note: line += f" | NOTE: {note}"
-    
     LOG_FILE_HANDLE.write(line + "\n")
-    LOG_FILE_HANDLE.flush()  # 🔒 Flush immediato
+    LOG_FILE_HANDLE.flush()
 
 def log_csv(event, name, sku, t_stock, s_stock, t_price, s_price, f_price, note):
     if not CSV_WRITER: return
     CSV_WRITER.writerow([event, name[:50], sku, t_stock, s_stock, t_price, s_price, f_price, note])
-    CSV_FILE_HANDLE.flush()  # 🔒 Flush immediato
+    CSV_FILE_HANDLE.flush()
 
 def cleanup_old_logs(days=7):
     now = time.time()
@@ -194,14 +190,10 @@ def publish_to_online_store(product_id):
         })
 
 def update_product_status(product_id, status):
-    # ✅ FIX: Formattazione corretta delle parentesi graffe
     shopify_post({
         "query": "mutation productUpdate($input: ProductInput!) { productUpdate(input: $input) { userErrors { message } } }", 
         "variables": {
-            "input": {
-                "id": product_id, 
-                "status": status
-            }
+            "input": { "id": product_id, "status": status }
         }
     })
 
@@ -233,14 +225,10 @@ def bulk_inventory_update(updates_list):
     if not updates_list: return
     for i in range(0, len(updates_list), 100):
         chunk = updates_list[i:i + 100]
-        # ✅ FIX: Formattazione corretta delle parentesi graffe
         shopify_post({
             "query": "mutation inventorySetOnHandQuantities($input: InventorySetOnHandQuantitiesInput!) { inventorySetOnHandQuantities(input: $input) { userErrors { message } } }", 
             "variables": {
-                "input": {
-                    "reason": "correction", 
-                    "setQuantities": chunk
-                }
+                "input": { "reason": "correction", "setQuantities": chunk }
             }
         })
         console_log(f"  -> Inviato pacchetto stock {i+len(chunk)}/{len(updates_list)}...")
@@ -254,11 +242,32 @@ def bulk_price_update(product_id, variants_prices):
         }
     })
 
+def add_variant_to_product(product_id, sku, size, price, stock):
+    o_name = "Taglia EU" if any(c.isdigit() for c in size) else "Taglia"
+    q = """
+    mutation vCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+      productVariantsBulkCreate(productId: $productId, variants: $variants) {
+        productVariants { id sku }
+        userErrors { field message }
+      }
+    }
+    """
+    v = {
+        "productId": product_id,
+        "variants": [{
+            "price": str(price), "sku": sku,
+            "optionValues": [{"optionName": o_name, "name": size}],
+            "inventoryItem": {"tracked": True},
+            "inventoryQuantities": [{"locationId": LOCATION_ID, "name": "available", "quantity": int(stock)}]
+        }]
+    }
+    return shopify_post({"query": q, "variables": v})
+
 def get_shopify_inventory():
     console_log("Download inventario Shopify globale in corso...")
     inv, status_map, cursor, has_next = {}, {}, None, True
     while has_next:
-        q = f'query($cursor: String) {{ productVariants(first: 250, after: $cursor) {{ pageInfo {{ hasNextPage endCursor }} edges {{ node {{ id sku price product {{ id status tags }} inventoryItem {{ id inventoryLevel(locationId: "{LOCATION_ID}") {{ quantities(names: ["available"]) {{ quantity }} }} }} }} }} }} }}'
+        q = f'query($cursor: String) {{ productVariants(first: 250, after: $cursor) {{ pageInfo {{ hasNextPage endCursor }} edges {{ node {{ id sku price product {{ id status tags }} inventoryItem {{ id inventoryLevel(locationId: "{LOCATION_ID}") {{ quantities(names: ["available"]) {{ quantity }} }} }} }} }} }} }} }}'
         vdata = shopify_post({"query": q, "variables": {"cursor": cursor}}).get("data", {}).get("productVariants", {})
         for e in vdata.get("edges", []):
             n = e["node"]; sku = n.get("sku")
@@ -275,17 +284,24 @@ def create_product(name, item, variants):
     bsku, brand = item.get("sku", "NOSKU"), item.get("brand", "Custom")
     handle_slug = HANDLE_RE.sub('-', name.lower()).strip('-'); sku_slug = HANDLE_RE.sub('-', bsku.lower()).strip('-')
     
-    vars_shopify, option_values = [], []
+    vars_shopify = []
     for v in variants:
         size_val = str(v.get('eu_size', '') or v.get('size', '')).strip()
-        vars_shopify.append({"price": str(round(float(v.get("price", 0)) * 1.22 * 1.10, 2)), "sku": f"{bsku}-{size_val}" if size_val else bsku, "optionValues": [{"optionName": o_name, "name": size_val or "N/A"}], "inventoryQuantities": [{"name": "available", "quantity": int(v.get("stock", 0)), "locationId": LOCATION_ID}]})
-        option_values.append({"name": size_val or "N/A"})
+        vars_shopify.append({
+            "price": str(round(float(v.get("price", 0)) * 1.22 * 1.10, 2)), 
+            "sku": f"{bsku}-{size_val}" if size_val else bsku, 
+            "options": [size_val or "N/A"], 
+            "inventoryQuantities": [{"availableQuantity": int(v.get("stock", 0)), "locationId": LOCATION_ID}]
+        })
 
-    images_payload = []
-    if item.get("image") and "not_found" not in item.get("image", ""): images_payload.append({"src": item["image"], "altText": name})
+    product_input = {
+        "title": name, "handle": f"{handle_slug}-{sku_slug}", "vendor": brand, "productType": p_type, "status": "ACTIVE",
+        "tags": ["Turum", "turum-sync", p_type, brand], "options": [o_name], "variants": vars_shopify
+    }
+    if item.get("image") and "not_found" not in item.get("image", ""):
+        product_input["images"] = [{"src": item["image"]}]
 
-    v = {"input": {"title": name, "handle": f"{handle_slug}-{sku_slug}", "vendor": brand, "productType": p_type, "status": "ACTIVE", "tags": ["Turum", "turum-sync", p_type, brand], "productOptions": [{"name": o_name, "values": option_values}], "variants": vars_shopify, "images": images_payload}}
-    return shopify_post({"query": "mutation productSet($input: ProductSetInput!) { productSet(input: $input) { product { id } } }", "variables": v})
+    return shopify_post({"query": "mutation pCreate($input: ProductInput!) { productCreate(input: $input) { product { id } userErrors { message } } }", "variables": {"input": product_input}})
 
 # =========================
 # MAIN EXECUTION
@@ -334,13 +350,19 @@ def main():
                     t_price_raw = float(v.get("price", 0))
                     f_price = round(t_price_raw * 1.22 * 1.10, 2)
 
-                    if sku not in shopify_db: log_txt("MISSING", name, sku, note="Variante su Turum ma non su Shopify"); continue
+                    if sku not in shopify_db:
+                        # FIX [MISSING]: Crea variante se il prodotto base esiste
+                        first_variant_sku = next((f"{base_sku}-{str(vx.get('eu_size','') or vx.get('size','')).strip()}" for vx in variants if f"{base_sku}-{str(vx.get('eu_size','') or vx.get('size','')).strip()}" in shopify_db), None)
+                        if first_variant_sku:
+                            parent_pid = shopify_db[first_variant_sku]["product_id"]
+                            add_variant_to_product(parent_pid, sku, size, f_price, t_stock)
+                            log_txt("FIXED", name, sku, note="Variante creata automaticamente")
+                        continue
 
                     shop_d = shopify_db[sku]
                     p_id, p_total_stock = shop_d["product_id"], p_total_stock + t_stock
                     s_changed, p_changed = False, False
 
-                    # ✅ Fix casting esplicito per qty
                     s_qty_now = int(shop_d["qty"] or 0)
                     if s_qty_now != t_stock:
                         stock_updates.append({"inventoryItemId": shop_d["inv_id"], "locationId": LOCATION_ID, "quantity": t_stock})
@@ -351,105 +373,74 @@ def main():
                         prices_updates[p_id].append({"id": shop_d["variant_id"], "price": str(f_price)})
                         stats["price_changed"] += 1; p_changed = True
 
-                    # 📝 Logga su TXT sempre, su CSV solo se c'è un cambiamento
-                    log_txt("UPDATE" if (s_changed or p_changed) else "OK", name, sku, 
-                            t_stock, s_qty_now, "SI" if s_changed else "NO", 
-                            t_price_raw, shop_d["price"], f_price, "SI" if p_changed else "NO")
-                    
-                    if s_changed or p_changed: 
-                        log_csv("UPDATE", name, sku, t_stock, s_qty_now, t_price_raw, shop_d["price"], f_price, 
-                                f"Stock {'SI' if s_changed else 'NO'} | Price {'SI' if p_changed else 'NO'}")
+                    log_txt("UPDATE" if (s_changed or p_changed) else "OK", name, sku, t_stock, s_qty_now, "SI" if s_changed else "NO", t_price_raw, shop_d["price"], f_price, "SI" if p_changed else "NO")
+                    if s_changed or p_changed: log_csv("UPDATE", name, sku, t_stock, s_qty_now, t_price_raw, shop_d["price"], f_price, f"Stock {'SI' if s_changed else 'NO'} | Price {'SI' if p_changed else 'NO'}")
 
                 if p_id and p_id in product_status_map:
                     if p_total_stock == 0 and product_status_map[p_id] == "ACTIVE":
                         update_product_status(p_id, "DRAFT"); stats["drafted"] += 1
-                        log_txt("STATUS", name, "ALL", note="Prodotto esaurito -> Messo in BOZZA")
-                        log_csv("STATUS", name, "ALL", 0, 0, "-", "-", "-", "Esaurito -> BOZZA")
                     elif p_total_stock > 0 and product_status_map[p_id] == "DRAFT":
                         update_product_status(p_id, "ACTIVE"); stats["activated"] += 1
-                        log_txt("STATUS", name, "ALL", note="Prodotto tornato in stock -> Messo ATTIVO")
-                        log_csv("STATUS", name, "ALL", p_total_stock, 0, "-", "-", "-", "In Stock -> ATTIVO")
 
             else:
                 if stats["new"] >= MAX_NEW_PRODUCTS_PER_RUN: continue
                 res = create_product(name, item, variants)
-                
-                # Estraiamo l'ID, ma anche eventuali messaggi di errore da Shopify
-                pid = res.get("data", {}).get("productSet", {}).get("product", {}).get("id")
-                user_errors = res.get("data", {}).get("productSet", {}).get("userErrors",[])
-                top_errors = res.get("errors",[])
-
+                pid = res.get("data", {}).get("productCreate", {}).get("product", {}).get("id")
                 if pid:
                     pending_publish_ids.append(pid)
                     p_type = "Scarpe" if any(c.isdigit() for c in str(variants[0].get("size", ""))) else "Abbigliamento"
                     coll_p = get_or_create_collection(p_type); coll_b = get_or_create_collection(item.get("brand", "Custom"))
                     numeric_pid = int(pid.split("/")[-1])
                     pending_collection_assigns.extend([{"p_id": numeric_pid, "c_id": coll_p}, {"p_id": numeric_pid, "c_id": coll_b}])
-                    
                     stats["new"] += 1
                     for v in variants: 
-                        sku_new = f"{base_sku}-{v.get('size','')}"
-                        log_txt("NEW", name, sku_new, note="Creato ex-novo in Shopify (Batch)")
-                        log_csv("NEW", name, sku_new, v.get("stock",0), 0, v.get("price",0), 0, round(float(v.get("price",0))*1.22*1.10,2), "Prodotto nuovo")
-                else:
-                    # Raccogliamo il vero motivo dell'errore
-                    error_details = "Errore Sconosciuto"
-                    if user_errors:
-                        error_details = " | ".join([e.get("message", "") for e in user_errors])
-                    elif top_errors:
-                        error_details = " | ".join([e.get("message", "") for e in top_errors])
-                        
-                    log_txt("ERROR", name, base_sku, note=f"Errore Shopify: {error_details}")
-                    
+                        log_txt("NEW", name, f"{base_sku}-{v.get('size','') or v.get('eu_size','')}", note="Creato ex-novo")
+                else: 
+                    log_txt("ERROR", name, base_sku, note=f"Errore creazione: {res.get('data',{}).get('productCreate',{}).get('userErrors')}")
+
         print(); console_log("Fase 1 completata. Analisi Ghost e invio Bulk..."); print("=" * 60)
 
         if prices_updates:
-            console_log(f"Aggiornamento prezzi simultaneo per {len(prices_updates)} prodotti...")
+            console_log(f"Aggiornamento prezzi per {len(prices_updates)} prodotti...")
             for p_id, v_list in prices_updates.items(): bulk_price_update(p_id, v_list)
 
         if pending_publish_ids:
-            console_log(f"Pubblicazione in blocco di {len(pending_publish_ids)} prodotti...")
+            console_log(f"Pubblicazione di {len(pending_publish_ids)} prodotti...")
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as exec:
                 futures = [exec.submit(publish_to_online_store, pid) for pid in pending_publish_ids]; concurrent.futures.wait(futures)
 
         if pending_collection_assigns:
-            console_log(f"Assegnazione in blocco a {len(pending_collection_assigns)} collezioni...")
+            console_log(f"Assegnazione collezioni...")
             with concurrent.futures.ThreadPoolExecutor(max_workers=10) as exec:
                 futures = [exec.submit(add_product_to_collection, a["p_id"], a["c_id"]) for a in pending_collection_assigns]; concurrent.futures.wait(futures)
 
-        # 👻 ANALISI GHOST
+        # 👻 ANALISI GHOST: Azzeramento + Messa in Bozza
         ghost_count, ghosts_stocked = 0, 0
+        products_to_draft = set()
         for sku, data in shopify_db.items():
             if data["is_turum"] and sku not in turum_skus_seen:
                 ghost_count += 1
                 s_qty = int(data.get("qty", 0) or 0)
-                note = ""
                 if s_qty > 0:
                     stock_updates.append({"inventoryItemId": data["inv_id"], "locationId": LOCATION_ID, "quantity": 0})
-                    ghosts_stocked += 1; note = f"Stock azzerato (Prima: {s_qty})."
-                else: note = "Già a 0 su Shopify."
-                log_txt("GHOST", "PRODOTTO RIMOSSO", sku, note=note)
+                    ghosts_stocked += 1
+                products_to_draft.add(data["product_id"])
+                log_txt("GHOST", "Rimosso/Esaurito", sku)
 
-        total_stock_sent = stats['stock_changed'] + ghosts_stocked
+        for pid in products_to_draft: update_product_status(pid, "DRAFT")
+
         if stock_updates:
-            console_log(f"Invio di {total_stock_sent} aggiornamenti giacenze ({stats['stock_changed']} normali + {ghosts_stocked} ghost)...")
+            console_log(f"Invio di {len(stock_updates)} aggiornamenti stock...")
             bulk_inventory_update(stock_updates)
 
-        # 📊 RIEPILOGO FINALE
         elapsed_seconds = time.perf_counter() - START_TIME
         mins, secs = divmod(int(elapsed_seconds), 60)
         cleanup_old_logs(days=7)
 
         print("\n" + "=" * 60); console_log("RIEPILOGO FINALE"); print("=" * 60)
-        print(f"  ⏳ Tempo di esecuzione:       {mins} min e {secs} sec")
-        print(f"  📦 Nuovi prodotti creati:     {stats['new']}")
-        print(f"  🔄 Variazioni Stock inviate:  {total_stock_sent}")
-        print(f"  💶 Variazioni Prezzi:         {stats['price_changed']}")
-        print(f"  👻 Varianti 'Ghost' azzerate: {ghost_count} (di cui {ghosts_stocked} con stock attivo)")
-        print(f"  🛌 Prodotti messi in Bozza:   {stats['drafted']}")
-        print(f"  ☀️ Prodotti Riattivati:       {stats['activated']}")
-        print(f"\n  📄 Log Audit (TXT):         {LOG_FILENAME}")
-        print(f"  📊 Log Modifiche (CSV):     {CSV_FILENAME}")
+        print(f"  ⏳ Tempo: {mins}m {secs}s | 📦 Nuovi: {stats['new']} | 🔄 Stock: {stats['stock_changed'] + ghosts_stocked}")
+        print(f"  💶 Prezzi: {stats['price_changed']} | 👻 Ghost: {ghost_count} | 🛌 Bozza: {len(products_to_draft)}")
+        print(f"\n  📄 TXT: {LOG_FILENAME} | 📊 CSV: {CSV_FILENAME}")
         print("=" * 60)
 
     finally: close_logs()
