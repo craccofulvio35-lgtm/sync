@@ -41,7 +41,6 @@ MAX_NEW_PRODUCTS_PER_RUN = 1850
 HANDLE_RE = re.compile(r'[^a-z0-9]+', re.IGNORECASE)
 
 SHOP_SESSION = requests.Session()
-# Riduco il backoff_factor per evitare attese infinite se Shopify dà colpi di 500
 RETRY_STRATEGY = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
 ADAPTER = HTTPAdapter(max_retries=RETRY_STRATEGY, pool_connections=25, pool_maxsize=100)
 SHOP_SESSION.mount("https://", ADAPTER)
@@ -184,7 +183,7 @@ def get_online_store_publication_id():
 def publish_to_online_store(product_id):
     if PUBLICATION_ID: 
         shopify_post({
-            "query": "mutation publishablePublish($id: ID!, $input: [PublicationInput!]!) { publishablePublish(id: $id, input: $input) { userErrors { message } } }", 
+            "query": "mutation publishablePublish($id: ID!, $input:[PublicationInput!]!) { publishablePublish(id: $id, input: $input) { userErrors { message } } }", 
             "variables": {
                 "id": product_id, 
                 "input":[{"publicationId": PUBLICATION_ID}]
@@ -237,9 +236,8 @@ def bulk_price_update(product_id, variants_prices):
     })
 
 def add_variant_to_product(product_id, sku, size, price, stock, o_name):
-    # La mutation corretta per varianti mancanti. ProductVariantsBulkInput è supportato
     q = """
-    mutation vBulk($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    mutation vBulk($productId: ID!, $variants:[ProductVariantsBulkInput!]!) {
       productVariantsBulkCreate(productId: $productId, variants: $variants) {
         productVariants { id sku }
         userErrors { field message }
@@ -248,7 +246,7 @@ def add_variant_to_product(product_id, sku, size, price, stock, o_name):
     """
     v = {"productId": product_id, "variants":[{
         "price": str(price), "sku": sku,
-        "optionValues": [{"optionName": o_name, "name": size}],
+        "optionValues":[{"optionName": o_name, "name": size}],
         "inventoryItem": {"tracked": True},
         "inventoryQuantities":[{"locationId": LOCATION_ID, "name": "available", "quantity": int(stock)}]
     }]}
@@ -257,21 +255,46 @@ def add_variant_to_product(product_id, sku, size, price, stock, o_name):
 def get_shopify_inventory():
     console_log("Download inventario Shopify globale in corso...")
     inv, status_map, cursor, has_next = {}, {}, None, True
+    
+    # FIX: Query formattata in modo pulito e con le parentesi controllate!
     while has_next:
-        q = f'query($cursor: String) {{ productVariants(first: 250, after: $cursor) {{ pageInfo {{ hasNextPage endCursor }} edges {{ node {{ id sku price product {{ id status tags }} inventoryItem {{ id inventoryLevel(locationId: "{LOCATION_ID}") {{ quantities(names:["available"]) {{ quantity }} }} }} }} }} }} }} }}'
+        q = f"""
+        query($cursor: String) {{
+          productVariants(first: 250, after: $cursor) {{
+            pageInfo {{ hasNextPage endCursor }}
+            edges {{
+              node {{
+                id sku price
+                product {{ id status tags }}
+                inventoryItem {{
+                  id
+                  inventoryLevel(locationId: "{LOCATION_ID}") {{
+                    quantities(names: ["available"]) {{ quantity }}
+                  }}
+                }}
+              }}
+            }}
+          }}
+        }}
+        """
         res = shopify_post({"query": q, "variables": {"cursor": cursor}})
         if "errors" in res and not res.get("data"):
             console_log(f"Errore GraphQL fatale nel download inventario: {res['errors']}")
             sys.exit(1)
+            
         vdata = res.get("data", {}).get("productVariants", {})
-        for e in vdata.get("edges", []):
+        for e in vdata.get("edges",[]):
             n = e["node"]; sku = n.get("sku")
             if not sku: continue
             p_id = n["product"]["id"]; status_map[p_id] = n["product"]["status"]
             qty = 0
-            if n.get("inventoryItem", {}).get("inventoryLevel"): qty = n["inventoryItem"]["inventoryLevel"]["quantities"][0]["quantity"]
+            if n.get("inventoryItem", {}).get("inventoryLevel"): 
+                qty = n["inventoryItem"]["inventoryLevel"]["quantities"][0]["quantity"]
             inv[sku] = {"variant_id": n["id"], "product_id": p_id, "inv_id": n["inventoryItem"]["id"], "qty": qty, "price": float(n["price"]), "is_turum": "Turum" in n["product"]["tags"]}
-        has_next, cursor = vdata.get("pageInfo", {}).get("hasNextPage", False), vdata.get("pageInfo", {}).get("endCursor")
+        
+        has_next = vdata.get("pageInfo", {}).get("hasNextPage", False)
+        cursor = vdata.get("pageInfo", {}).get("endCursor")
+        
     return inv, status_map
 
 def create_product(name, item, variants):
@@ -282,7 +305,6 @@ def create_product(name, item, variants):
     vars_shopify =[]
     for v in variants:
         size_val = str(v.get('eu_size', '') or v.get('size', '')).strip()
-        # Per ProductVariantInput le inventoryQuantities prendono availableQuantity, e le opzioni sono stringhe piatte
         vars_shopify.append({
             "price": str(round(float(v.get("price", 0)) * 1.22 * 1.10, 2)), 
             "sku": f"{bsku}-{size_val}" if size_val else bsku, 
@@ -291,17 +313,14 @@ def create_product(name, item, variants):
             "inventoryQuantities":[{"locationId": LOCATION_ID, "availableQuantity": int(v.get("stock", 0))}]
         })
 
-    # Usiamo productCreate invece di productSet per maggiore stabilità schema-level
     product_input = {
         "title": name, "handle": f"{handle_slug}-{sku_slug}", "vendor": brand, "productType": p_type, "status": "ACTIVE", 
         "tags":["Turum", "turum-sync", p_type, brand], "options": [o_name], "variants": vars_shopify
     }
     
-    variables = {"input": product_input}
-    
-    # media argument separato
+    variables = {"input": product_input, "media":[]} # Inizializza array vuoto
     if item.get("image") and "not_found" not in item.get("image", ""):
-        variables["media"] =[{
+        variables["media"] = [{
             "alt": name,
             "mediaContentType": "IMAGE",
             "originalSource": item["image"]
@@ -345,8 +364,8 @@ def main():
         pending_publish_ids, pending_collection_assigns = [],[]
 
         for idx, item in enumerate(products, 1):
-            name, base_sku, variants = item.get("name", "").strip(), item.get("sku", "NOSKU"), item.get("variants", [])
-            sys.stdout.write(f"\r\033[K[{datetime.now().strftime('%H:%M:%S')}] [{idx}/{len(products)}] Elaborazione: {name[:40]}..."); sys.stdout.flush()
+            name, base_sku, variants = item.get("name", "").strip(), item.get("sku", "NOSKU"), item.get("variants",[])
+            sys.stdout.write(f"\r\033[K[{datetime.now().strftime('%H:%M:%S')}][{idx}/{len(products)}] Elaborazione: {name[:40]}..."); sys.stdout.flush()
 
             if not item.get("image") or "not_found" in item.get("image"):
                 log_txt("SKIP", name, base_sku, note="Nessuna immagine fornita da Turum"); continue
@@ -374,7 +393,7 @@ def main():
                     p_total_stock += t_stock
 
                     if sku not in shopify_db: 
-                        # FIX [MISSING] -> Tenta di creare la variante che manca
+                        # FIX[MISSING] -> Tenta di creare la variante che manca
                         res_v = add_variant_to_product(existing_p_id, sku, size, f_price, t_stock, o_name)
                         v_err = res_v.get("data", {}).get("productVariantsBulkCreate", {}).get("userErrors",[])
                         
@@ -456,7 +475,7 @@ def main():
             with concurrent.futures.ThreadPoolExecutor(max_workers=10) as exec:
                 futures =[exec.submit(add_product_to_collection, a["p_id"], a["c_id"]) for a in pending_collection_assigns]; concurrent.futures.wait(futures)
 
-        # 👻 ANALISI GHOST (Fix pulizia store)
+        # 👻 ANALISI GHOST
         ghost_count, ghosts_stocked = 0, 0
         products_to_draft = set()
         
