@@ -463,6 +463,8 @@ def main():
         PUBLICATION_ID = get_online_store_publication_id()
         if not LOCATION_ID: console_log("ERRORE: LOCATION_ID non trovato."); sys.exit(1)
         console_log(f"Shopify API in uso: {SHOPIFY_API_VERSION}")
+        console_log(f"AUTO_CREATE_MISSING_VARIANTS: {AUTO_CREATE_MISSING_VARIANTS}")
+        console_log(f"Script in esecuzione: {os.path.abspath(__file__)}")
 
         preload_collections_cache()
         products = get_turum_data()
@@ -475,6 +477,7 @@ def main():
         stock_updates, prices_updates = [], {}
         turum_skus_seen = set()
         stats = {"new": 0, "existing": 0, "stock_changed": 0, "price_changed": 0, "drafted": 0, "activated": 0, "missing_created": 0}
+        missing_candidates_total = 0
         
         pending_publish_ids, pending_collection_assigns, pending_image_uploads = [], [], []
 
@@ -529,6 +532,7 @@ def main():
                                 f"Stock {'SI' if s_changed else 'NO'} | Price {'SI' if p_changed else 'NO'}")
 
                 if p_id and missing_variants and AUTO_CREATE_MISSING_VARIANTS:
+                    missing_candidates_total += len(missing_variants)
                     created_skus = create_missing_variants(p_id, base_sku, name, missing_variants, option_name)
                     if created_skus:
                         stats["missing_created"] += len(created_skus)
@@ -538,6 +542,12 @@ def main():
                                 continue
                             log_txt("NEW", name, mv_sku, note="Variante mancante creata su prodotto esistente")
                             log_csv("NEW", name, mv_sku, mv.get("stock",0), 0, mv.get("price",0), 0, calc_final_price(mv.get("price",0)), "Variante mancante creata")
+                elif missing_variants and not AUTO_CREATE_MISSING_VARIANTS:
+                    missing_candidates_total += len(missing_variants)
+                    log_txt("SKIP", name, base_sku, note=f"Auto-creazione varianti mancanti disattivata ({len(missing_variants)} varianti)")
+                elif missing_variants and not p_id:
+                    missing_candidates_total += len(missing_variants)
+                    log_txt("ERROR", name, base_sku, note=f"Impossibile creare varianti mancanti: product_id non disponibile ({len(missing_variants)} varianti)")
 
                 if p_id and p_id in product_status_map:
                     if p_total_stock == 0 and product_status_map[p_id] == "ACTIVE":
@@ -557,6 +567,8 @@ def main():
                     existing_product_skus = get_product_variant_skus(existing_pid_by_handle)
                     option_name = "Taglia EU" if any(c.isdigit() for c in str(variants[0].get("eu_size", "") or variants[0].get("size", ""))) else "Taglia"
                     missing_for_existing = [v for v in variants if build_variant_sku(base_sku, v) not in existing_product_skus]
+                    if missing_for_existing:
+                        missing_candidates_total += len(missing_for_existing)
                     created_skus = create_missing_variants(existing_pid_by_handle, base_sku, name, missing_for_existing, option_name)
                     if created_skus:
                         stats["missing_created"] += len(created_skus)
@@ -659,6 +671,7 @@ def main():
         print(f"  ðŸ›Œ Prodotti messi in Bozza:   {stats['drafted']}")
         print(f"  â˜€ï¸ Prodotti Riattivati:       {stats['activated']}")
         print(f"  ðŸ§© Varianti mancanti create:   {stats['missing_created']}")
+        print(f"  ðŸ“ Varianti mancanti candidate: {missing_candidates_total}")
         print(f"\n  ðŸ“„ Log Audit (TXT):         {LOG_FILENAME}")
         print(f"  ðŸ“Š Log Modifiche (CSV):     {CSV_FILENAME}")
         print("=" * 60)
@@ -667,3 +680,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
