@@ -226,6 +226,7 @@ def update_product_status(product_id, status):
 _collection_cache = {}
 _handle_product_cache = {}
 _product_variants_cache = {}
+_missing_create_failure_reasons = {}
 def preload_collections_cache():
     try:
         r = shopify_rest("GET", "custom_collections.json?limit=250&fields=id,title")
@@ -273,6 +274,11 @@ def parse_shopify_user_errors(data, root_key):
         message = err.get("message", "Errore sconosciuto")
         notes.append(f"{field}: {message}" if field else message)
     return notes
+
+def add_failure_reasons(notes):
+    for note in notes:
+        key = (note or "Errore sconosciuto").strip()
+        _missing_create_failure_reasons[key] = _missing_create_failure_reasons.get(key, 0) + 1
 
 def format_errors_for_log(data, root_key, default_note):
     top_errors = data.get("errors", [])
@@ -394,8 +400,31 @@ def create_missing_variants(product_id, base_sku, name, missing_variants, option
     })
     errors = parse_shopify_user_errors(res, "productVariantsBulkCreate")
     if errors:
-        log_txt("ERROR", name, base_sku, note=f"Creazione varianti mancanti fallita: {'; '.join(errors[:3])}")
-        return set()
+        add_failure_reasons(errors)
+        # Fallback robusto: se il bulk fallisce, prova variante-per-variante.
+        created_skus = set()
+        for mv in missing_variants:
+            single_payload = [build_variant_payload(base_sku, mv, option_name)]
+            single_res = shopify_post({
+                "query": "mutation productVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) { productVariantsBulkCreate(productId: $productId, variants: $variants) { productVariants { id sku } userErrors { field message } } }",
+                "variables": {"productId": product_id, "variants": single_payload}
+            })
+            single_errors = parse_shopify_user_errors(single_res, "productVariantsBulkCreate")
+            if single_errors:
+                add_failure_reasons(single_errors)
+                log_txt("ERROR", name, build_variant_sku(base_sku, mv), note=f"Creazione variante fallita: {'; '.join(single_errors[:2])}")
+                continue
+            single_created = single_res.get("data", {}).get("productVariantsBulkCreate", {}).get("productVariants", []) or []
+            for sc in single_created:
+                sku = sc.get("sku")
+                if sku:
+                    created_skus.add(sku)
+        if created_skus:
+            cached = _product_variants_cache.get(product_id, set())
+            _product_variants_cache[product_id] = set(cached).union(created_skus)
+        else:
+            log_txt("ERROR", name, base_sku, note=f"Creazione varianti mancanti fallita (bulk+single): {'; '.join(errors[:3])}")
+        return created_skus
     created = res.get("data", {}).get("productVariantsBulkCreate", {}).get("productVariants", []) or []
     created_skus = {v.get("sku") for v in created if v.get("sku")}
     if created_skus:
@@ -682,6 +711,10 @@ def main():
         print(f"  â˜€ï¸ Prodotti Riattivati:       {stats['activated']}")
         print(f"  ðŸ§© Varianti mancanti create:   {stats['missing_created']}")
         print(f"  ðŸ“ Varianti mancanti candidate: {missing_candidates_total}")
+        if _missing_create_failure_reasons:
+            print("  ðŸ§ª Top errori creazione varianti:")
+            for reason, count in sorted(_missing_create_failure_reasons.items(), key=lambda x: x[1], reverse=True)[:5]:
+                print(f"     - {count}x {reason[:120]}")
         print(f"\n  ðŸ“„ Log Audit (TXT):         {LOG_FILENAME}")
         print(f"  ðŸ“Š Log Modifiche (CSV):     {CSV_FILENAME}")
         print("=" * 60)
