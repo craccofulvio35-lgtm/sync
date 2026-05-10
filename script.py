@@ -267,9 +267,19 @@ def parse_shopify_user_errors(data, root_key):
 
 def format_errors_for_log(data, root_key, default_note):
     top_errors = data.get("errors", [])
-    notes = [str(err.get("message", err)) for err in top_errors[:3]]
-    notes.extend(parse_shopify_user_errors(data, root_key)[:3])
-    return "; ".join(notes) if notes else default_note
+    notes = []
+    for err in top_errors[:3]:
+        if isinstance(err, dict):
+            msg = err.get("message")
+            if msg:
+                notes.append(str(msg))
+        elif err:
+            notes.append(str(err))
+    notes.extend([n for n in parse_shopify_user_errors(data, root_key)[:3] if n])
+    if notes:
+        return "; ".join(notes)
+    raw = json.dumps(data, ensure_ascii=False)[:400]
+    return f"{default_note} | Raw: {raw}" if raw else default_note
 
 def get_variant_size(variant):
     return str(variant.get("eu_size", "") or variant.get("size", "")).strip()
@@ -576,4 +586,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
