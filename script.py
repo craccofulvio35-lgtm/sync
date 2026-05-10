@@ -87,6 +87,13 @@ def close_logs():
         CSV_FILE_HANDLE.flush()
         CSV_FILE_HANDLE.close()
 
+def log_info(note):
+    if not LOG_FILE_HANDLE or LOG_FILE_HANDLE.closed:
+        return
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    LOG_FILE_HANDLE.write(f"[{timestamp}] [INFO] {note}\n")
+    LOG_FILE_HANDLE.flush()
+
 def log_txt(event, name, sku, t_stock="N/A", s_stock="N/A", s_changed="NO", 
             t_price="N/A", s_price="N/A", f_price="N/A", p_changed="NO", note=""):
     if not LOG_FILE_HANDLE or LOG_FILE_HANDLE.closed: return
@@ -465,6 +472,9 @@ def main():
         console_log(f"Shopify API in uso: {SHOPIFY_API_VERSION}")
         console_log(f"AUTO_CREATE_MISSING_VARIANTS: {AUTO_CREATE_MISSING_VARIANTS}")
         console_log(f"Script in esecuzione: {os.path.abspath(__file__)}")
+        log_info(f"Shopify API in uso: {SHOPIFY_API_VERSION}")
+        log_info(f"AUTO_CREATE_MISSING_VARIANTS: {AUTO_CREATE_MISSING_VARIANTS}")
+        log_info(f"Script in esecuzione: {os.path.abspath(__file__)}")
 
         preload_collections_cache()
         products = get_turum_data()
@@ -680,3 +690,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
