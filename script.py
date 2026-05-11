@@ -774,7 +774,7 @@ def main():
 
         if pending_publish_ids:
             console_log(f"Pubblicazione in blocco di {len(pending_publish_ids)} prodotti...")
-            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as exec:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as exec:
                 futures = [exec.submit(publish_to_online_store, pid) for pid in pending_publish_ids]; concurrent.futures.wait(futures)
 
         if pending_image_uploads:
