@@ -101,17 +101,17 @@ def log_txt(event, name, sku, t_stock="N/A", s_stock="N/A", s_changed="NO",
     timestamp = datetime.now().strftime("%H:%M:%S")
     line = f"[{timestamp}] [{event}] {name[:45]}... | SKU: {sku} | "
     if event not in ["SKIP", "ERROR", "GHOST"]:
-        line += f"Turum Price: â‚¬{t_price} | Shopify Before: â‚¬{s_price} | Final Calc: â‚¬{f_price} | Price Updated: {p_changed} | "
+        line += f"Turum Price: €{t_price} | Shopify Before: €{s_price} | Final Calc: €{f_price} | Price Updated: {p_changed} | "
         line += f"Turum Stock: {t_stock} | Shopify Before: {s_stock} | Stock Updated: {s_changed}"
     if note: line += f" | NOTE: {note}"
     
     LOG_FILE_HANDLE.write(line + "\n")
-    LOG_FILE_HANDLE.flush()  # ðŸ”’ Flush immediato
+    LOG_FILE_HANDLE.flush()
 
 def log_csv(event, name, sku, t_stock, s_stock, t_price, s_price, f_price, note):
     if not CSV_WRITER: return
     CSV_WRITER.writerow([event, name[:50], sku, t_stock, s_stock, t_price, s_price, f_price, note])
-    CSV_FILE_HANDLE.flush()  # ðŸ”’ Flush immediato
+    CSV_FILE_HANDLE.flush()
 
 def cleanup_old_logs(days=7):
     now = time.time()
@@ -120,7 +120,7 @@ def cleanup_old_logs(days=7):
         if os.stat(f).st_mtime < now - (days * 86400): 
             os.remove(f)
             deleted += 1
-    if deleted > 0: console_log(f"ðŸ§¹ Pulizia automatica: Eliminati {deleted} vecchi report.")
+    if deleted > 0: console_log(f"🧹 Pulizia automatica: Eliminati {deleted} vecchi report.")
 
 # =========================
 # API SHOPIFY (ANTI-CRASH + BACKOFF ADATTIVO)
@@ -130,7 +130,7 @@ def handle_rate_limit(attempt):
     base = 2 ** attempt
     jitter = random.uniform(0, math.sqrt(base))
     sleep_time = min(base + jitter, 8)
-    console_log(f"â¸ï¸ Rate limit/Throttle: attesa {sleep_time:.1f}s")
+    console_log(f"⏳ Rate limit/Throttle: attesa {sleep_time:.1f}s")
     time.sleep(sleep_time)
 
 def shopify_post(payload, retries=5):
@@ -219,7 +219,6 @@ def publish_to_online_store(product_id):
         })
 
 def update_product_status(product_id, status):
-    # âœ… FIX: Formattazione corretta delle parentesi graffe
     shopify_post({
         "query": "mutation productUpdate($input: ProductInput!) { productUpdate(input: $input) { userErrors { message } } }", 
         "variables": {
@@ -234,6 +233,7 @@ _collection_cache = {}
 _handle_product_cache = {}
 _product_variants_cache = {}
 _missing_create_failure_reasons = {}
+
 def preload_collections_cache():
     try:
         r = shopify_rest("GET", "custom_collections.json?limit=250&fields=id,title")
@@ -326,7 +326,6 @@ def build_variant_payload(base_sku, variant, option_name):
         "inventoryQuantities": [{"name": "available", "quantity": int(variant.get("stock", 0)), "locationId": LOCATION_ID}]
     }
 
-# ✅ FIX — sku dentro inventoryItem
 def build_bulk_create_variant_payload(base_sku, variant, option_name):
     size_val = get_variant_size(variant)
     return {
@@ -425,7 +424,6 @@ def create_missing_variants(product_id, base_sku, name, missing_variants, option
                 "variables": {"productId": product_id, "variants": variants_payload}
             })
             last_res = res_try if isinstance(res_try, dict) else {}
-            # risposta valida se contiene data o errors
             if isinstance(last_res, dict) and ("data" in last_res or "errors" in last_res):
                 return last_res
             time.sleep(0.35 * (attempt + 1))
@@ -514,9 +512,9 @@ def create_missing_variants(product_id, base_sku, name, missing_variants, option
 
 def get_shopify_inventory():
     console_log("Download inventario Shopify globale in corso...")
-    inv, status_map, cursor, has_next = {}, {}, None, True
+    inv, status_map, product_meta_map, cursor, has_next = {}, {}, {}, None, True
     while has_next:
-        q = f'query($cursor: String) {{ productVariants(first: 250, after: $cursor) {{ pageInfo {{ hasNextPage endCursor }} edges {{ node {{ id sku price product {{ id status tags }} inventoryItem {{ id inventoryLevel(locationId: "{LOCATION_ID}") {{ quantities(names: ["available"]) {{ quantity }} }} }} }} }} }} }}'
+        q = f'query($cursor: String) {{ productVariants(first: 250, after: $cursor) {{ pageInfo {{ hasNextPage endCursor }} edges {{ node {{ id sku price product {{ id status tags onlineStoreUrl featuredImage {{ id }} }} inventoryItem {{ id inventoryLevel(locationId: "{LOCATION_ID}") {{ quantities(names: ["available"]) {{ quantity }} }} }} }} }} }} }}'
         vdata = shopify_post({"query": q, "variables": {"cursor": cursor}}).get("data", {}).get("productVariants", {})
         for e in vdata.get("edges", []):
             n = e.get("node", {}) or {}
@@ -527,6 +525,11 @@ def get_shopify_inventory():
             if not p_id:
                 continue
             status_map[p_id] = product.get("status", "DRAFT")
+            if p_id not in product_meta_map:
+                product_meta_map[p_id] = {
+                    "is_published": bool(product.get("onlineStoreUrl")),
+                    "has_image": bool(product.get("featuredImage"))
+                }
             qty = 0
             inventory_item = n.get("inventoryItem", {}) or {}
             inv_level = inventory_item.get("inventoryLevel")
@@ -543,7 +546,7 @@ def get_shopify_inventory():
                 "is_turum": "Turum" in (product.get("tags") or [])
             }
         has_next, cursor = vdata.get("pageInfo", {}).get("hasNextPage", False), vdata.get("pageInfo", {}).get("endCursor")
-    return inv, status_map
+    return inv, status_map, product_meta_map
 
 def create_product(name, item, variants):
     p_type, o_name = ("Scarpe", "Taglia EU") if any(c.isdigit() for c in str(variants[0].get("eu_size", "") or variants[0].get("size", ""))) else ("Abbigliamento", "Taglia")
@@ -589,7 +592,7 @@ def main():
 
         preload_collections_cache()
         products = get_turum_data()
-        shopify_db, product_status_map = get_shopify_inventory()
+        shopify_db, product_status_map, product_meta_map = get_shopify_inventory()
 
         console_log(f"Trovati {len(products)} prodotti su Turum.")
         console_log(f"Trovate {len(shopify_db)} varianti totali su Shopify.")
@@ -597,6 +600,7 @@ def main():
 
         stock_updates, prices_updates = [], {}
         turum_skus_seen = set()
+        repaired_pids = set()
         stats = {"new": 0, "existing": 0, "stock_changed": 0, "price_changed": 0, "drafted": 0, "activated": 0, "missing_created": 0}
         missing_candidates_total = 0
         missing_create_attempted_total = 0
@@ -634,7 +638,6 @@ def main():
                     p_id, p_total_stock = shop_d["product_id"], p_total_stock + t_stock
                     s_changed, p_changed = False, False
 
-                    # âœ… Fix casting esplicito per qty
                     s_qty_now = int(shop_d["qty"] or 0)
                     if s_qty_now != t_stock:
                         stock_updates.append({"inventoryItemId": shop_d["inv_id"], "locationId": LOCATION_ID, "quantity": t_stock})
@@ -645,7 +648,6 @@ def main():
                         prices_updates[p_id].append({"id": shop_d["variant_id"], "price": str(f_price)})
                         stats["price_changed"] += 1; p_changed = True
 
-                    # ðŸ“ Logga su TXT sempre, su CSV solo se c'Ã¨ un cambiamento
                     log_txt("UPDATE" if (s_changed or p_changed) else "OK", name, sku, 
                             t_stock, s_qty_now, "SI" if s_changed else "NO", 
                             t_price_raw, shop_d["price"], f_price, "SI" if p_changed else "NO")
@@ -666,7 +668,7 @@ def main():
                             if mv_sku not in created_skus:
                                 continue
                             log_txt("NEW", name, mv_sku, note="Variante mancante creata su prodotto esistente")
-                            log_csv("NEW", name, mv_sku, mv.get("stock",0), 0, mv.get("price",0), 0, calc_final_price(mv.get("price",0)), "Variante mancante creata")
+                            log_csv("NEW", name, mv_sku, mv.get("stock", 0), 0, mv.get("price", 0), 0, calc_final_price(mv.get("price", 0)), "Variante mancante creata")
                 elif missing_variants and not AUTO_CREATE_MISSING_VARIANTS:
                     missing_candidates_total += len(missing_variants)
                     log_txt("SKIP", name, base_sku, note=f"Auto-creazione varianti mancanti disattivata ({len(missing_variants)} varianti)")
@@ -683,6 +685,24 @@ def main():
                         update_product_status(p_id, "ACTIVE"); stats["activated"] += 1
                         log_txt("STATUS", name, "ALL", note="Prodotto tornato in stock -> Messo ATTIVO")
                         log_csv("STATUS", name, "ALL", p_total_stock, 0, "-", "-", "-", "In Stock -> ATTIVO")
+
+                if p_id and p_total_stock > 0 and p_id not in repaired_pids:
+                    meta = product_meta_map.get(p_id, {})
+                    needs_publish = not meta.get("is_published", True)
+                    needs_image = not meta.get("has_image", True)
+                    if needs_publish or needs_image:
+                        repaired_pids.add(p_id)
+                        if needs_publish:
+                            pending_publish_ids.append(p_id)
+                        if needs_image:
+                            pending_image_uploads.append({"pid": p_id, "image": item.get("image"), "name": name})
+                        p_type = "Scarpe" if any(c.isdigit() for c in str(variants[0].get("eu_size", "") or variants[0].get("size", ""))) else "Abbigliamento"
+                        coll_p = get_or_create_collection(p_type)
+                        coll_b = get_or_create_collection(item.get("brand", "Custom"))
+                        numeric_pid = int(p_id.split("/")[-1])
+                        pending_collection_assigns.extend([{"p_id": numeric_pid, "c_id": coll_p}, {"p_id": numeric_pid, "c_id": coll_b}])
+                        repair_actions = (["pubblicazione"] if needs_publish else []) + (["immagine"] if needs_image else []) + ["collezioni"]
+                        log_txt("REPAIR", name, base_sku, note=f"Auto-repair: {', '.join(repair_actions)}")
 
             else:
                 if stats["new"] >= MAX_NEW_PRODUCTS_PER_RUN: continue
@@ -704,7 +724,7 @@ def main():
                             if mv_sku not in created_skus:
                                 continue
                             log_txt("NEW", name, mv_sku, note="Variante creata su prodotto già esistente (handle match)")
-                            log_csv("NEW", name, mv_sku, mv.get("stock",0), 0, mv.get("price",0), 0, calc_final_price(mv.get("price",0)), "Variante creata su handle esistente")
+                            log_csv("NEW", name, mv_sku, mv.get("stock", 0), 0, mv.get("price", 0), 0, calc_final_price(mv.get("price", 0)), "Variante creata su handle esistente")
                     continue
                 res = create_product(name, item, variants)
                 product_set = (res.get("data", {}) or {}).get("productSet") or {}
@@ -723,10 +743,9 @@ def main():
                         size_new = str(v.get('eu_size', '') or v.get('size', '')).strip()
                         sku_new = f"{base_sku}-{size_new}" if size_new else base_sku
                         log_txt("NEW", name, sku_new, note="Creato ex-novo in Shopify (Batch)")
-                        log_csv("NEW", name, sku_new, v.get("stock",0), 0, v.get("price",0), 0, round(float(v.get("price",0))*1.22*1.10,2), "Prodotto nuovo")
+                        log_csv("NEW", name, sku_new, v.get("stock", 0), 0, v.get("price", 0), 0, round(float(v.get("price", 0)) * 1.22 * 1.10, 2), "Prodotto nuovo")
                 else: 
                     err_note = shopify_error_note(res)
-                    # Recovery automatico: in caso di handle già esistente, riconcilia le varianti sul prodotto trovato.
                     if "handle" in err_note.lower() and "already in use" in err_note.lower():
                         existing_pid_by_handle = get_product_id_by_handle(pre_handle)
                         if existing_pid_by_handle:
@@ -743,7 +762,7 @@ def main():
                                     if mv_sku not in created_skus:
                                         continue
                                     log_txt("NEW", name, mv_sku, note="Recovery da handle duplicato: variante creata")
-                                    log_csv("NEW", name, mv_sku, mv.get("stock",0), 0, mv.get("price",0), 0, calc_final_price(mv.get("price",0)), "Recovery handle duplicato")
+                                    log_csv("NEW", name, mv_sku, mv.get("stock", 0), 0, mv.get("price", 0), 0, calc_final_price(mv.get("price", 0)), "Recovery handle duplicato")
                                 continue
                     log_txt("ERROR", name, base_sku, note=err_note)
 
@@ -768,7 +787,7 @@ def main():
             with concurrent.futures.ThreadPoolExecutor(max_workers=10) as exec:
                 futures = [exec.submit(add_product_to_collection, a["p_id"], a["c_id"]) for a in pending_collection_assigns]; concurrent.futures.wait(futures)
 
-        # ðŸ‘» ANALISI GHOST
+        # 👻 ANALISI GHOST
         ghost_count, ghosts_stocked = 0, 0
         for sku, data in shopify_db.items():
             if data["is_turum"] and sku not in turum_skus_seen:
@@ -778,7 +797,7 @@ def main():
                 if s_qty > 0:
                     stock_updates.append({"inventoryItemId": data["inv_id"], "locationId": LOCATION_ID, "quantity": 0})
                     ghosts_stocked += 1; note = f"Stock azzerato (Prima: {s_qty})."
-                else: note = "GiÃ  a 0 su Shopify."
+                else: note = "Già a 0 su Shopify."
                 log_txt("GHOST", "PRODOTTO RIMOSSO", sku, note=note)
 
         total_stock_sent = stats['stock_changed'] + ghosts_stocked
@@ -786,25 +805,26 @@ def main():
             console_log(f"Invio di {total_stock_sent} aggiornamenti giacenze ({stats['stock_changed']} normali + {ghosts_stocked} ghost)...")
             bulk_inventory_update(stock_updates)
 
-        # ðŸ“Š RIEPILOGO FINALE
+        # 📊 RIEPILOGO FINALE
         elapsed_seconds = time.perf_counter() - START_TIME
         mins, secs = divmod(int(elapsed_seconds), 60)
         cleanup_old_logs(days=7)
 
         print("\n" + "=" * 60); console_log("RIEPILOGO FINALE"); print("=" * 60)
-        print(f"  â³ Tempo di esecuzione:       {mins} min e {secs} sec")
-        print(f"  ðŸ“¦ Nuovi prodotti creati:     {stats['new']}")
-        print(f"  ðŸ”„ Variazioni Stock inviate:  {total_stock_sent}")
-        print(f"  ðŸ’¶ Variazioni Prezzi:         {stats['price_changed']}")
-        print(f"  ðŸ‘» Varianti 'Ghost' azzerate: {ghost_count} (di cui {ghosts_stocked} con stock attivo)")
-        print(f"  ðŸ›Œ Prodotti messi in Bozza:   {stats['drafted']}")
-        print(f"  â˜€ï¸ Prodotti Riattivati:       {stats['activated']}")
-        print(f"  ðŸ§© Varianti mancanti create:   {stats['missing_created']}")
-        print(f"  ðŸ“ Varianti mancanti candidate: {missing_candidates_total}")
-        print(f"  ðŸŽ¯ Tentativi creazione varianti: {missing_create_attempted_total}")
-        print(f"  ðŸš« Creazioni varianti fallite:  {missing_create_failed_total}")
+        print(f"  ⏳ Tempo di esecuzione:       {mins} min e {secs} sec")
+        print(f"  📦 Nuovi prodotti creati:     {stats['new']}")
+        print(f"  🔄 Variazioni Stock inviate:  {total_stock_sent}")
+        print(f"  💶 Variazioni Prezzi:         {stats['price_changed']}")
+        print(f"  👻 Varianti 'Ghost' azzerate: {ghost_count} (di cui {ghosts_stocked} con stock attivo)")
+        print(f"  🛌 Prodotti messi in Bozza:   {stats['drafted']}")
+        print(f"  ☀️  Prodotti Riattivati:       {stats['activated']}")
+        print(f"  🧩 Varianti mancanti create:   {stats['missing_created']}")
+        print(f"  🔍 Varianti mancanti candidate: {missing_candidates_total}")
+        print(f"  🎯 Tentativi creazione varianti: {missing_create_attempted_total}")
+        print(f"  🚫 Creazioni varianti fallite:  {missing_create_failed_total}")
+        print(f"  🔧 Prodotti auto-riparati:     {len(repaired_pids)}")
         if _missing_create_failure_reasons:
-            print("  ðŸ§ª Top errori creazione varianti:")
+            print("  🧪 Top errori creazione varianti:")
             for reason, count in sorted(_missing_create_failure_reasons.items(), key=lambda x: x[1], reverse=True)[:5]:
                 print(f"     - {count}x {reason[:120]}")
 
@@ -812,16 +832,16 @@ def main():
         log_info(f"Tentativi creazione varianti: {missing_create_attempted_total}")
         log_info(f"Varianti mancanti create: {stats['missing_created']}")
         log_info(f"Creazioni varianti fallite: {missing_create_failed_total}")
+        log_info(f"Prodotti auto-riparati: {len(repaired_pids)}")
         if _missing_create_failure_reasons:
             top_errors = sorted(_missing_create_failure_reasons.items(), key=lambda x: x[1], reverse=True)[:5]
             for reason, count in top_errors:
                 log_info(f"Top errore creazione varianti: {count}x {reason[:180]}")
-        print(f"\n  ðŸ“„ Log Audit (TXT):         {LOG_FILENAME}")
-        print(f"  ðŸ“Š Log Modifiche (CSV):     {CSV_FILENAME}")
+        print(f"\n  📄 Log Audit (TXT):         {LOG_FILENAME}")
+        print(f"  📊 Log Modifiche (CSV):     {CSV_FILENAME}")
         print("=" * 60)
 
     finally: close_logs()
 
 if __name__ == "__main__":
     main()
-
